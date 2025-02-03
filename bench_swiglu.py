@@ -11,7 +11,7 @@ def bit_fwd(A, B, C, M, N, K):
 
 @torch.inference_mode()
 def vanilla_gemm_fwd(A, B, C):
-    torch.mm(A, B, out=C[0])
+    torch.mm(A, B, out=C)
 
 @torch.inference_mode()
 def module_swig_fwd(swig, C):
@@ -57,13 +57,13 @@ def eager_swiglu_fwd(A, B, C, M, N):
         ],
         styles=[('#17becf', '-', 'o'), ('#d62728', '-', 's')], 
         ylabel="TFLOP/s", 
-        plot_name="Gated MLP for Llama 70B",
+        plot_name="Gated MLP for Llama 405B",
         args={}
     ))
 def benchmark(Tokens, provider):
-    K = 8192
+    K = 16384
     M = N = Tokens
-    N = 28672*2
+    N = 53248*2
     device = 0
     A = torch.randn((M, K), dtype=torch.bfloat16, device=device) 
     B = torch.randn((N, K), dtype=torch.bfloat16, device=device)
@@ -72,7 +72,7 @@ def benchmark(Tokens, provider):
     C2 = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
     # torch.cuda.empty_cache()
     swig = Swiglu(M, N, K)
-    swig.x = A.view(1, M, K)
+    swig.x = A.view(M, K)
     swig.w = BT
 
     quantiles = [0.5, 0.2, 0.8]

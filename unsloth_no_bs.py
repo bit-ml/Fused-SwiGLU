@@ -8,6 +8,9 @@ It is unclear to me if this is related to a stranger hardware issue in our cloud
 import triton.language as tl
 import triton 
 import torch
+import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 @triton.jit
 def _fg_kernel(e, g, h, n_elements, BLOCK_SIZE : tl.constexpr,):
