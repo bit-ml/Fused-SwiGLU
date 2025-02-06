@@ -29,7 +29,7 @@ class Swiglu(nn.Module):
 
     def forward(self, C):
         torch.matmul(self.x, self.w, out=C)
-        return swiglu_fg_kernel(C[:, :self.N//2], C[:, self.N//2:])
+        return C[:, ::2] * F.silu(C[:, 1::2])
 
 @torch.inference_mode()
 def eager_swiglu_fwd(A, B, C, M, N):
@@ -92,8 +92,9 @@ def benchmark(Tokens, provider):
     C2 = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
     # torch.cuda.empty_cache()
     swig = Swiglu(M, N, K)
-    swig.x = A.view(1, M, K)
+    swig.x = A.view(M, K)
     swig.w = BT
+    swig = torch.compile(swig)
 
     A_bs = A.view(1, M, K)
     W_up = B[:, ::2].clone()
