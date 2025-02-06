@@ -1,3 +1,6 @@
 [submodule "csrc/cutlass"]
 	path = csrc/cutlass
 	url = git@github.com:NVIDIA/cutlass.git
+[submodule "extras/fattorib"]
+	path = extras/fattorib
+	url = https://github.com/fattorib/fusedswiglu

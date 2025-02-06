@@ -5,6 +5,8 @@ import torch.nn.functional as F
 import torch.nn as nn
 import fused_mlp_module
 from unsloth_no_bs import swiglu_fg_kernel
+from xformers.ops.swiglu_op import DualGemmSiluOp
+from fused_swiglu.kernels.kernels_bf16 import fused_swiglu_fwd
 
 def bit_fwd(A, B, C, M, N, K):
     fused_mlp_module.swiglu_fwd_bf16(M, N, K, A, K, B, K, C, N)
@@ -31,14 +33,24 @@ class Swiglu(nn.Module):
 
 @torch.inference_mode()
 def eager_swiglu_fwd(A, B, C, M, N):
+    # return fused_swiglu_fwd(A, B[:, ::2], B[:, 1::2])
     torch.mm(A, B, out=C)
     return swiglu_fg_kernel(C[:, :N//2], C[:, N//2:])  
+
+@torch.inference_mode()
+def triton_fwd(A, B):
+    return fused_swiglu_fwd(A, B[:, ::2], B[:, 1::2])
+
+@torch.inference_mode()
+def xformers_fwd(A, W1, W2):
+    return DualGemmSiluOp.OPERATOR(A, W1, None, W2, None)
 
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['Tokens'], 
-        x_vals=[1024,
+        x_vals=[512,
+                1024,
                 2048,
                 4096,
                 8192,
@@ -49,21 +61,29 @@ def eager_swiglu_fwd(A, B, C, M, N):
         line_arg='provider',
         line_vals=[
             'cuBLAS+Unsloth',
+            # 'fattorib',
+            # 'xformers',
             'Fused',
         ],
         line_names=[
-            "cuBLAS+Unsloth",
-            "Fused",
+            'cuBLAS+Unsloth',
+            # 'fattorib',
+            # 'xformers',
+            'Fused',
         ],
-        styles=[('#17becf', '-', 'o'), ('#d62728', '-', 's')], 
+        styles=[
+            ('#17becf', '-', 'o'),
+            # ('#ff7f0e', '-', '^'),
+            # ('#2ca02c', '-', 'D'), 
+            ('#d62728', '-', 's')], 
         ylabel="TFLOP/s", 
-        plot_name="Gated MLP for Llama 405B",
+        plot_name="Gated MLP for Llama 70B",
         args={}
     ))
 def benchmark(Tokens, provider):
-    K = 16384
+    K = 8192
     M = N = Tokens
-    N = 53248*2
+    N = 28672*2
     device = 0
     A = torch.randn((M, K), dtype=torch.bfloat16, device=device) 
     B = torch.randn((N, K), dtype=torch.bfloat16, device=device)
@@ -72,14 +92,22 @@ def benchmark(Tokens, provider):
     C2 = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
     # torch.cuda.empty_cache()
     swig = Swiglu(M, N, K)
-    swig.x = A.view(M, K)
+    swig.x = A.view(1, M, K)
     swig.w = BT
 
+    A_bs = A.view(1, M, K)
+    W_up = B[:, ::2].clone()
+    W_gate = B[:, 1::2].clone()
     quantiles = [0.5, 0.2, 0.8]
     if provider == "cuBLAS+Unsloth":
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: eager_swiglu_fwd(A, BT, C2, M, N), quantiles=quantiles)
     elif provider == "Fused":
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: fused_mlp_module.swiglu_fwd_bf16(M, N, K, A, K, B, K, C, N), quantiles=quantiles)
+    elif provider == "fattorib":
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: triton_fwd(A_bs, BT), quantiles=quantiles)
+    elif provider == "xformers":
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: xformers_fwd(A, W_up, W_gate), quantiles=quantiles)
+
     # flops for matmul are MN(2K-1), and then the glu is
     # sigmoid(C) = (1+exp(-C))^-1 - this is 4 flops
     # silu(C) = C * sigmoid(C) - 1 flop
