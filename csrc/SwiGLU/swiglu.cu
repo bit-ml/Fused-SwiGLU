@@ -454,7 +454,7 @@ void swiglu_fwd(int64_t m, int64_t n, int64_t k,
                                  Tile<_64,_8,_16>{});      // 64x8x16 Tiled MMA for copying RMEM->SMEM and reducing for gating
   
     Copy_Atom<SM75_U32x4_LDSM_N, TA> s2r_atom_A;
-    Copy_Atom<SM75_U32x2_LDSM_N, TB> s2r_atom_B; // this seems to work better than U32x4 for B in terms of perf
+    Copy_Atom<SM75_U32x2_LDSM_N, TB> s2r_atom_B; // smaller atom due to 8x16 tile on B (instead of 16x16)
 
 
     // launch kernel
