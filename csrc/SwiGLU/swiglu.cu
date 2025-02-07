@@ -307,10 +307,8 @@ namespace Fused_MLP {
 
       // Load A, B shmem->regs for k_block+1
       auto k_block_reg_next = (k_block_reg + Int<1>{}) % K_BLOCK_REG_MAX;      // static
-      #if 1
       copy(s2r_atom_A, tXsA_p(_,_,k_block_reg_next), tXrA(_,_,k_block_reg_next));
       copy(s2r_atom_B, tXsB_p(_,_,k_block_reg_next), tXrB(_,_,k_block_reg_next));
-      #endif
 
       // Copy gmem to smem before computing gemm on each k-pipe
       if (k_block_reg == 0)
@@ -355,7 +353,7 @@ namespace Fused_MLP {
     
     Tensor mC_half = make_tensor(make_gmem_ptr(C), select<0,1>(shape_MNK_half), dC_half); // (M,N//2)
   
-    ThrCopy thr_copy_c = copy_c.get_slice(threadIdx.x);  // this feller actually uses the same memory for efficiency
+    ThrCopy thr_copy_c = copy_c.get_slice(threadIdx.x);  // this uses the same memory for efficiency
     Tensor tCsC = thr_copy_c.partition_S(sC);                     // (CPY,CPY_M,CPY_N)
     Tensor mcC_half = make_identity_tensor(shape(mC_half));
     Tensor cC_half = local_tile(mcC_half, half_tiler, cta_coord, Step<_1, _1, X>{}); // (BLK_M,BLK_N//2)
@@ -441,7 +439,7 @@ void swiglu_fwd(int64_t m, int64_t n, int64_t k,
                                       Layout<Shape<_16, _8>, Stride<_8, _1>>{}, // thr layout 16x8
                                       Layout<Shape<_1, _8>>{}); // val layout 1x8 -> K-major
 
-    // this will be used for the vectorized SMEM->GMEM store at the epilogue
+    // for the vectorized SMEM->GMEM store at the epilogue
     TiledCopy copyC = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t, uint128_t>, TC>{},
                                       Layout<Shape<_16, _8>, Stride<_8, _1>>{}, // thr layout 16x8
                                       Layout<Shape<_1, _8>>{}); // val layout 1x8 -> K-major
@@ -456,7 +454,7 @@ void swiglu_fwd(int64_t m, int64_t n, int64_t k,
                                  Tile<_64,_8,_16>{});      // 64x8x16 Tiled MMA for copying RMEM->SMEM and reducing for gating
   
     Copy_Atom<SM75_U32x4_LDSM_N, TA> s2r_atom_A;
-    Copy_Atom<SM75_U32x2_LDSM_N, TB> s2r_atom_B; // this seems to work better than U32x4 for B
+    Copy_Atom<SM75_U32x2_LDSM_N, TB> s2r_atom_B; // this seems to work better than U32x4 for B in terms of perf
 
 
     // launch kernel
@@ -470,6 +468,17 @@ void swiglu_fwd(int64_t m, int64_t n, int64_t k,
     dim3 dimGrid = block_swizzler.get_grid_shape(tiled_shape);
     dimGrid = dim3(dimGrid.x, dimGrid.y);
 
+    // the kernel momentarily works primarily with bfloat16 types
+    // C can work with either bf16 or fp32
+    // current 16x8x16 atom only supports bf16\fp16 for A and B
+    // fp16 support should be straightforward, but it's unusual for LLMs
+    // for fp32 in A and B there is no mma support
+    TORCH_CHECK(TsrA.scalar_type() == at::kBFloat16,
+            "Expected tensor A to be of type at::BFloat16, but got: ", TsrA.scalar_type());
+    TORCH_CHECK(TsrB.scalar_type() == at::kBFloat16,
+            "Expected tensor B to be of type at::BFloat16, but got: ", TsrB.scalar_type());
+    TORCH_CHECK(TsrC.scalar_type() == c10::CppTypeToScalarType<C_AT_TYPE>::value,
+            "Expected tensor C to be of type ", c10::CppTypeToScalarType<C_AT_TYPE>::value, ", but got: ", TsrC.scalar_type());
     TA const* __restrict__ A = reinterpret_cast<TA*>(TsrA.data_ptr<at::BFloat16>());
     TB const* __restrict__ B = reinterpret_cast<TB*>(TsrB.data_ptr<at::BFloat16>());
     TC      * __restrict__ C = reinterpret_cast<TC*>(TsrC.data_ptr<C_AT_TYPE>());
