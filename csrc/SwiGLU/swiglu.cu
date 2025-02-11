@@ -345,7 +345,6 @@ namespace Fused_MLP {
     //
     // Gating
     //
-
     // reuse allocated shared memory for C
     TC* __restrict__ smem_C = reinterpret_cast<TC*>(byte_smem);
     Tensor sC = make_tensor(make_smem_ptr(smem_C), sC_layout); // applies sC_layout (128x64 row-major) to shared memory
@@ -369,7 +368,8 @@ namespace Fused_MLP {
 
     ThrMMA thr_mma_copy = mma_copy.get_slice(threadIdx.x);
     Tensor tXsC      = thr_mma_copy.partition_C(sC);    // (MMA, MMA_M, MMA_N)
-    Tensor tCrC_copy = thr_mma_copy.make_fragment_C(thr_mma_copy.partition_C(gC_half));  // (MMA, MMA_M, MMA_N)
+    Tensor tCrC_copy = make_tensor(make_rmem_ptr(tCrC.data()), shape(thr_mma_copy.partition_C(gC_half)));
+
 
     auto MMA_M = size<1>(tCrC);
     auto MMA_N = size<2>(tCrC);
@@ -414,44 +414,43 @@ void swiglu_fwd(int64_t m, int64_t n, int64_t k,
     auto dC_half = make_stride(ldC/2, Int<1>{});
 
     // CTA tile sizes
-    auto bM = Int<128>{};
+    auto bM = Int<256>{};
     auto bN = Int<128>{};
     auto bN_half = Int<64>{};
-    auto bK = Int< 64>{};
+    auto bK = Int< 32>{};
     auto cta_tiler = make_shape(bM, bN, bK);
     auto half_tiler = make_shape(bM, bN_half, bK);
     auto bP = Int<  3>{}; // pipeline
 
     auto swizzle_atom = composition(Swizzle<3,3,3>{},
-                                  Layout<Shape <_8,_64>,
-                                         Stride<_64, _1>>{});
+                                 Layout<Shape<_8, _32>,
+                                        Stride<_32, _1>>{});
+
     auto sA = tile_to_shape(swizzle_atom, make_shape(bM,bK,bP));
     auto sB = tile_to_shape(swizzle_atom, make_shape(bN,bK,bP));
     auto sC = tile_to_shape(swizzle_atom, make_shape(bM, bN_half));
 
-
     // thread layouts
     TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, TA>{},
-                                      Layout<Shape<_16, _8>, Stride<_8, _1>>{}, // thr layout 16x8
+                                      Layout<Shape<_64, _4>, Stride<_4, _1>>{}, // thr layout 64x4
                                       Layout<Shape<_1, _8>>{}); // val layout 1x8 -> K-major
 
     TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, TB>{},
-                                      Layout<Shape<_16, _8>, Stride<_8, _1>>{}, // thr layout 16x8
+                                      Layout<Shape<_64, _4>, Stride<_4, _1>>{}, // thr layout 64x4
                                       Layout<Shape<_1, _8>>{}); // val layout 1x8 -> K-major
 
     // for the vectorized SMEM->GMEM store at the epilogue
     TiledCopy copyC = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t, uint128_t>, TC>{},
-                                      Layout<Shape<_16, _8>, Stride<_8, _1>>{}, // thr layout 16x8
+                                      Layout<Shape<_64, _4>, Stride<_4, _1>>{}, // thr layout 64x4
                                       Layout<Shape<_1, _8>>{}); // val layout 1x8 -> K-major
 
     TiledMMA mmaC = make_tiled_mma(SM80_16x8x16_F32BF16BF16F32_TN{}, // 16x8x16 mma
-                                 Layout<Shape<_2, _2>>{},    // 2x2x1 MMA Atoms
-                                 Tile<_64,_16,_16>{});      // 64x16x16 Tiled MMA for LDSM
+                                 Layout<Shape<_4, _2>>{},    // 4x2x1 MMA Atoms
+                                 Tile<_128,_32,_16>{});      // 64x16x16 Tiled MMA for LDSM
 
-    
     TiledMMA mmaC_gating = make_tiled_mma(SM80_16x4x16_F32BF16BF16F32_TN_GATED_COPY{}, // 16x4x16 mma atom for gate
-                                 Layout<Shape<_2, _2>>{},    // 2x2x1 MMA Atoms
-                                 Tile<_64,_8,_16>{});      // 64x8x16 Tiled MMA for copying RMEM->SMEM and reducing for gating
+                                 Layout<Shape<_4, _2>>{},    // 4x2x1 MMA Atoms
+                                 Tile<_128,_16,_16>{});      // 64x8x16 Tiled MMA for copying RMEM->SMEM and reducing for gating
   
     Copy_Atom<SM75_U32x4_LDSM_N, TA> s2r_atom_A;
     Copy_Atom<SM75_U32x2_LDSM_N, TB> s2r_atom_B; // smaller atom due to 8x16 tile on B (instead of 16x16)
